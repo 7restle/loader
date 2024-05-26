@@ -1,0 +1,86 @@
+import pyspark
+from pyspark.sql import SparkSession
+from pyspark.sql import DataFrame
+from pyspark.sql import functions as F
+from pyspark.sql.types import (
+    StructType,
+    StructField,
+    StringType,
+    IntegerType,
+    LongType,
+    DateType,
+)
+import struct
+import happybase
+
+sp = SparkSession.builder.appName("loader").getOrCreate()
+
+connection = happybase.Connection("localhost", 9090)
+
+
+def product_reviews_filter(data):
+    tmp = data.split("|")
+    for i in range(len(tmp)):
+        if i in [0, 3, 4, 5, 6, 7]:
+            if tmp[i] == "":
+                tmp[i] = 0
+            else:
+                tmp[i] = int(tmp[i])
+        else:
+            if tmp[i] == "":
+                tmp[i] = None
+            else:
+                tmp[i] = tmp[i]
+    return tmp
+
+
+product_reviews_schema = StructType(
+    [
+        StructField("pr_review_sk", LongType(), False),
+        StructField("pr_review_date", DateType(), True),
+        StructField("pr_review_time", StringType(), True),
+        StructField("pr_review_rating", IntegerType(), False),
+        StructField("pr_item_sk", LongType(), False),
+        StructField("pr_user_sk", LongType(), True),
+        StructField("pr_order_sk", LongType(), True),
+        StructField("pr_review_content", StringType(), False),
+    ]
+)
+
+data_path = "hdfs://localhost:9000/user/bigdata/benchmarks/bigbench/data/"
+data = sp.sparkContext.textFile(
+    data_path + "product_reviews/product_reviews_{:02d}.dat".format(1)
+)
+all_data = sp.createDataFrame(data.map(product_reviews_filter), product_reviews_schema)
+for i in range(2, 81):
+    data = sp.sparkContext.textFile(
+        data_path + "product_reviews/product_reviews_{:02d}.dat".format(i)
+    )
+    all_data = all_data.union(
+        data.map(product_reviews_filter).toDF(schema=product_reviews_schema)
+    )
+
+table = connection.table("product_reviews")
+for row in all_data.collect():
+    table.put(
+        bin(row["pr_review_sk"]),
+        {
+            "date:pr_review_date": (
+                row["pr_review_date"].isoformat() if row["pr_review_date"] else ""
+            ),
+            "str:pr_review_time": row["pr_review_time"],
+            "int:pr_review_rating": struct.pack("i", row["pr_review_rating"]),
+            "long:pr_item_sk": struct.pack("q", row["pr_item_sk"]),
+            "long:pr_user_sk": (
+                struct.pack("q", row["pr_user_sk"])
+                if row["pr_user_sk"] is not None
+                else b""
+            ),
+            "long:pr_order_sk": (
+                struct.pack("q", row["pr_order_sk"])
+                if row["pr_order_sk"] is not None
+                else b""
+            ),
+            "str:pr_review_content": row["pr_review_content"],
+        },
+    )
